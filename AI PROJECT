@@ -1,0 +1,170 @@
+"""
+Customer Churn Prediction - Telco Customer Churn Dataset (Kaggle)
+Machine Learning Project
+
+Pipeline: load -> clean -> EDA -> preprocess -> train (2 models) -> evaluate -> save artifacts
+"""
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report, roc_auc_score, roc_curve
+)
+import json
+import os
+
+sns.set_theme(style="whitegrid")
+os.makedirs("figures", exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# 1. LOAD DATA
+# ---------------------------------------------------------------------------
+df = pd.read_csv("WA_Fn-UseC_-Telco-Customer-Churn.csv")
+print(f"Dataset shape: {df.shape}")
+
+# ---------------------------------------------------------------------------
+# 2. CLEANING
+# ---------------------------------------------------------------------------
+# TotalCharges sometimes contains blank strings in the real dataset -> coerce
+df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce")
+df["TotalCharges"] = df["TotalCharges"].fillna(df["TotalCharges"].median())
+df.drop(columns=["customerID"], inplace=True)
+
+# ---------------------------------------------------------------------------
+# 3. EXPLORATORY DATA ANALYSIS (saved as figures for the report)
+# ---------------------------------------------------------------------------
+plt.figure(figsize=(5, 4))
+df["Churn"].value_counts().plot(kind="bar", color=["#2E86AB", "#E63946"])
+plt.title("Churn Class Distribution")
+plt.xlabel("Churn"); plt.ylabel("Count")
+plt.tight_layout(); plt.savefig("figures/01_churn_distribution.png", dpi=150); plt.close()
+
+plt.figure(figsize=(6, 4))
+sns.histplot(data=df, x="tenure", hue="Churn", multiple="stack", bins=30, palette=["#2E86AB", "#E63946"])
+plt.title("Tenure Distribution by Churn")
+plt.tight_layout(); plt.savefig("figures/02_tenure_by_churn.png", dpi=150); plt.close()
+
+plt.figure(figsize=(6, 4))
+sns.boxplot(data=df, x="Churn", y="MonthlyCharges", palette=["#2E86AB", "#E63946"])
+plt.title("Monthly Charges by Churn")
+plt.tight_layout(); plt.savefig("figures/03_monthlycharges_by_churn.png", dpi=150); plt.close()
+
+plt.figure(figsize=(7, 4))
+sns.countplot(data=df, x="Contract", hue="Churn", palette=["#2E86AB", "#E63946"])
+plt.title("Churn by Contract Type")
+plt.tight_layout(); plt.savefig("figures/04_contract_by_churn.png", dpi=150); plt.close()
+
+# ---------------------------------------------------------------------------
+# 4. PREPROCESSING
+# ---------------------------------------------------------------------------
+data = df.copy()
+target = "Churn"
+data[target] = data[target].map({"Yes": 1, "No": 0})
+
+categorical_cols = data.select_dtypes(include="object").columns.tolist()
+numeric_cols = data.select_dtypes(include=["int64", "float64"]).columns.tolist()
+numeric_cols.remove(target)
+
+# One-hot encode categoricals
+data_encoded = pd.get_dummies(data, columns=categorical_cols, drop_first=True)
+
+X = data_encoded.drop(columns=[target])
+y = data_encoded[target]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# ---------------------------------------------------------------------------
+# 5. TRAIN MODELS
+# ---------------------------------------------------------------------------
+results = {}
+
+# Baseline: Logistic Regression
+log_reg = LogisticRegression(max_iter=1000, random_state=42)
+log_reg.fit(X_train_scaled, y_train)
+y_pred_lr = log_reg.predict(X_test_scaled)
+y_proba_lr = log_reg.predict_proba(X_test_scaled)[:, 1]
+
+results["Logistic Regression"] = {
+    "accuracy": accuracy_score(y_test, y_pred_lr),
+    "precision": precision_score(y_test, y_pred_lr),
+    "recall": recall_score(y_test, y_pred_lr),
+    "f1": f1_score(y_test, y_pred_lr),
+    "roc_auc": roc_auc_score(y_test, y_proba_lr),
+}
+
+# Main model: Random Forest
+rf = RandomForestClassifier(
+    n_estimators=300, max_depth=10, min_samples_leaf=2, random_state=42, n_jobs=-1
+)
+rf.fit(X_train, y_train)  # tree-based model doesn't need scaling
+y_pred_rf = rf.predict(X_test)
+y_proba_rf = rf.predict_proba(X_test)[:, 1]
+
+results["Random Forest"] = {
+    "accuracy": accuracy_score(y_test, y_pred_rf),
+    "precision": precision_score(y_test, y_pred_rf),
+    "recall": recall_score(y_test, y_pred_rf),
+    "f1": f1_score(y_test, y_pred_rf),
+    "roc_auc": roc_auc_score(y_test, y_proba_rf),
+}
+
+print(json.dumps(results, indent=2))
+
+# ---------------------------------------------------------------------------
+# 6. EVALUATION FIGURES
+# ---------------------------------------------------------------------------
+# Confusion matrix - Random Forest
+cm = confusion_matrix(y_test, y_pred_rf)
+plt.figure(figsize=(4.5, 4))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=["No Churn", "Churn"], yticklabels=["No Churn", "Churn"])
+plt.title("Confusion Matrix - Random Forest")
+plt.ylabel("Actual"); plt.xlabel("Predicted")
+plt.tight_layout(); plt.savefig("figures/05_confusion_matrix.png", dpi=150); plt.close()
+
+# ROC curves - both models
+plt.figure(figsize=(5.5, 4.5))
+for name, y_proba in [("Logistic Regression", y_proba_lr), ("Random Forest", y_proba_rf)]:
+    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    auc = roc_auc_score(y_test, y_proba)
+    plt.plot(fpr, tpr, label=f"{name} (AUC={auc:.3f})")
+plt.plot([0, 1], [0, 1], "k--", alpha=0.4)
+plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+plt.title("ROC Curve Comparison")
+plt.legend()
+plt.tight_layout(); plt.savefig("figures/06_roc_curve.png", dpi=150); plt.close()
+
+# Feature importance - Random Forest
+importances = pd.Series(rf.feature_importances_, index=X.columns).sort_values(ascending=False).head(12)
+plt.figure(figsize=(7, 5))
+importances.sort_values().plot(kind="barh", color="#2E86AB")
+plt.title("Top 12 Feature Importances - Random Forest")
+plt.xlabel("Importance")
+plt.tight_layout(); plt.savefig("figures/07_feature_importance.png", dpi=150); plt.close()
+
+# ---------------------------------------------------------------------------
+# 7. SAVE RESULTS
+# ---------------------------------------------------------------------------
+with open("results.json", "w") as f:
+    json.dump(results, f, indent=2)
+
+with open("classification_report_rf.txt", "w") as f:
+    f.write(classification_report(y_test, y_pred_rf, target_names=["No Churn", "Churn"]))
+
+importances.sort_values(ascending=False).to_csv("feature_importance.csv")
+
+print("\nDone. Figures saved in ./figures, metrics in results.json")
